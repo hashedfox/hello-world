@@ -1,2 +1,2 @@
 # hello-world
-I just want to get better at programming
+//Last time i checked i was human, hopefully it remains that way otherwise i'm > ? 
