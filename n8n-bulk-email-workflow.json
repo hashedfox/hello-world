@@ -1,0 +1,402 @@
+{
+  "name": "Bulk Custom Email Sender from Spreadsheet",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-manual",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $json.spreadsheet_id || '' }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "read-spreadsheet",
+      "name": "Read Spreadsheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [220, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets OAuth2"
+        }
+      },
+      "notes": "Configure: Set your Google Sheet document ID and sheet name. Expected columns: email, first_name, last_name, company, subject, custom_field_1, custom_field_2 (add more as needed)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "email-not-empty",
+              "leftValue": "={{ $json.email }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            },
+            {
+              "id": "email-valid-format",
+              "leftValue": "={{ $json.email }}",
+              "rightValue": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$",
+              "operator": {
+                "type": "string",
+                "operation": "regex"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-valid-emails",
+      "name": "Filter Valid Emails",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "split-batches",
+      "name": "Rate Limiter",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [660, 300],
+      "notes": "Processes one email at a time to respect rate limits and avoid spam detection"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build a fully personalized email for each recipient\nconst item = $input.first().json;\n\nconst firstName = (item.first_name || '').trim();\nconst lastName = (item.last_name || '').trim();\nconst company = (item.company || '').trim();\nconst email = (item.email || '').trim();\nconst subject = (item.subject || '').trim();\nconst customField1 = (item.custom_field_1 || '').trim();\nconst customField2 = (item.custom_field_2 || '').trim();\n\n// Fallback greeting if no first name\nconst greeting = firstName ? `Hi ${firstName},` : 'Hello,';\n\n// Build personalized subject line\nconst personalizedSubject = subject\n  .replace(/{{first_name}}/gi, firstName)\n  .replace(/{{last_name}}/gi, lastName)\n  .replace(/{{company}}/gi, company)\n  .replace(/{{custom_field_1}}/gi, customField1)\n  .replace(/{{custom_field_2}}/gi, customField2);\n\n// Build personalized email body from the spreadsheet body_template column,\n// or fall back to a default template\nconst bodyTemplate = (item.body_template || '').trim();\n\nlet htmlBody;\n\nif (bodyTemplate) {\n  // Replace all placeholders in the user-provided template\n  htmlBody = bodyTemplate\n    .replace(/{{greeting}}/gi, greeting)\n    .replace(/{{first_name}}/gi, firstName)\n    .replace(/{{last_name}}/gi, lastName)\n    .replace(/{{company}}/gi, company)\n    .replace(/{{custom_field_1}}/gi, customField1)\n    .replace(/{{custom_field_2}}/gi, customField2)\n    .replace(/\\n/g, '<br>');\n} else {\n  // Default template when no body_template column is provided\n  htmlBody = `\n    <div style=\"font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;\">\n      <p>${greeting}</p>\n      <p>${customField1 || 'I wanted to reach out to you regarding an opportunity.'}</p>\n      ${company ? `<p>I noticed your work at <strong>${company}</strong> and thought this would be relevant.</p>` : ''}\n      ${customField2 ? `<p>${customField2}</p>` : ''}\n      <p>Looking forward to hearing from you.</p>\n      <p>Best regards</p>\n    </div>\n  `;\n}\n\nreturn [{\n  json: {\n    to: email,\n    subject: personalizedSubject,\n    htmlBody: htmlBody,\n    firstName: firstName,\n    lastName: lastName,\n    company: company\n  }\n}];"
+      },
+      "id": "compose-email",
+      "name": "Compose Personalized Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300],
+      "notes": "Personalizes each email using spreadsheet columns. Supports placeholders: {{first_name}}, {{last_name}}, {{company}}, {{custom_field_1}}, {{custom_field_2}}"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.htmlBody }}",
+        "options": {}
+      },
+      "id": "send-email-gmail",
+      "name": "Send Email (Gmail)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1100, 200],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "notes": "Uses Gmail OAuth2. Replace with SMTP node if using a non-Gmail provider."
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "html": "={{ $json.htmlBody }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "send-email-smtp",
+      "name": "Send Email (SMTP)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1100, 500],
+      "disabled": true,
+      "credentials": {
+        "smtp": {
+          "id": "SMTP_CREDENTIAL_ID",
+          "name": "SMTP Account"
+        }
+      },
+      "notes": "Alternative: Enable this and disable the Gmail node if using SMTP (Outlook, custom domain, etc.)"
+    },
+    {
+      "parameters": {
+        "amount": 3,
+        "unit": "seconds"
+      },
+      "id": "wait-between-emails",
+      "name": "Delay Between Emails",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1320, 200],
+      "notes": "3-second delay between emails to avoid rate limits. Adjust as needed for your provider."
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "sent"
+            },
+            {
+              "name": "recipient",
+              "value": "={{ $('Compose Personalized Email').item.json.to }}"
+            },
+            {
+              "name": "subject",
+              "value": "={{ $('Compose Personalized Email').item.json.subject }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ $now.toISO() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "log-success",
+      "name": "Log Sent Email",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1540, 200],
+      "notes": "Logs successful sends for tracking"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Read Spreadsheet').params.documentId }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Send Log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "id": "write-log-to-sheet",
+      "name": "Write Log to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1760, 200],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets OAuth2"
+        }
+      },
+      "notes": "Writes send results back to a 'Send Log' tab in the same spreadsheet"
+    },
+    {
+      "parameters": {},
+      "id": "loop-back",
+      "name": "Loop Back",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1980, 200],
+      "notes": "Routes back to the batch splitter for the next email"
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ 'Failed to send email to: ' + $json.to + ' | Error: ' + $json.error.message }}"
+      },
+      "id": "error-handler",
+      "name": "Handle Send Error",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1320, 400],
+      "notes": "Captures failed sends so the workflow continues with remaining emails"
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Spreadsheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Spreadsheet": {
+      "main": [
+        [
+          {
+            "node": "Filter Valid Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Valid Emails": {
+      "main": [
+        [
+          {
+            "node": "Rate Limiter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limiter": {
+      "main": [
+        [
+          {
+            "node": "Loop Back",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Compose Personalized Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Personalized Email": {
+      "main": [
+        [
+          {
+            "node": "Send Email (Gmail)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email (Gmail)": {
+      "main": [
+        [
+          {
+            "node": "Delay Between Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email (SMTP)": {
+      "main": [
+        [
+          {
+            "node": "Delay Between Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delay Between Emails": {
+      "main": [
+        [
+          {
+            "node": "Log Sent Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Sent Email": {
+      "main": [
+        [
+          {
+            "node": "Write Log to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Log to Sheet": {
+      "main": [
+        [
+          {
+            "node": "Loop Back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Back": {
+      "main": [
+        [
+          {
+            "node": "Rate Limiter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Send Error": {
+      "main": [
+        [
+          {
+            "node": "Delay Between Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "bulk-email",
+      "id": "tag-bulk-email"
+    },
+    {
+      "name": "automation",
+      "id": "tag-automation"
+    }
+  ],
+  "pinData": {}
+}
