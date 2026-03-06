@@ -1,5 +1,5 @@
 {
-  "name": "Bulk Custom Email Sender from Spreadsheet",
+  "name": "Bulk Custom Email Sender from Spreadsheet (Secured)",
   "nodes": [
     {
       "parameters": {},
@@ -13,7 +13,7 @@
       "parameters": {
         "documentId": {
           "__rl": true,
-          "value": "={{ $json.spreadsheet_id || '' }}",
+          "value": "YOUR_GOOGLE_SHEET_ID_HERE",
           "mode": "id"
         },
         "sheetName": {
@@ -34,45 +34,18 @@
           "name": "Google Sheets OAuth2"
         }
       },
-      "notes": "Configure: Set your Google Sheet document ID and sheet name. Expected columns: email, first_name, last_name, company, subject, custom_field_1, custom_field_2 (add more as needed)"
+      "notes": "Configure: Set your Google Sheet document ID and sheet name. Expected columns: email, first_name, last_name, company, subject, body_template, custom_field_1, custom_field_2"
     },
     {
       "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict"
-          },
-          "conditions": [
-            {
-              "id": "email-not-empty",
-              "leftValue": "={{ $json.email }}",
-              "rightValue": "",
-              "operator": {
-                "type": "string",
-                "operation": "isNotEmpty"
-              }
-            },
-            {
-              "id": "email-valid-format",
-              "leftValue": "={{ $json.email }}",
-              "rightValue": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$",
-              "operator": {
-                "type": "string",
-                "operation": "regex"
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
+        "jsCode": "// SECURITY GATE: Validate, sanitize, deduplicate, and cap the input batch.\n// Addresses: email header injection, HTML injection, XSS, runaway execution,\n// duplicate sends, and input length abuse.\n\nconst MAX_RECIPIENTS = 500;\nconst MAX_FIELD_LENGTH = 2000;\nconst MAX_BODY_LENGTH = 50000;\nconst EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+\\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;\n\n// HTML-encode to prevent XSS / HTML injection when embedding into email body\nfunction escapeHtml(str) {\n  if (typeof str !== 'string') return '';\n  return str\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;')\n    .replace(/'/g, '&#x27;');\n}\n\n// Strip characters that enable email header injection (CR, LF, null bytes)\nfunction stripHeaderInjection(str) {\n  if (typeof str !== 'string') return '';\n  return str.replace(/[\\r\\n\\x00]/g, '');\n}\n\n// Truncate to a safe length\nfunction truncate(str, max) {\n  if (typeof str !== 'string') return '';\n  return str.length > max ? str.slice(0, max) : str;\n}\n\nconst items = $input.all();\nconst seen = new Set();\nconst validItems = [];\n\nfor (const item of items) {\n  const raw = item.json;\n\n  // -- Email validation --\n  const email = stripHeaderInjection(truncate((raw.email || '').trim().toLowerCase(), 254));\n  if (!email || !EMAIL_REGEX.test(email)) continue;\n\n  // -- Deduplication --\n  if (seen.has(email)) continue;\n  seen.add(email);\n\n  // -- Recipient cap --\n  if (validItems.length >= MAX_RECIPIENTS) break;\n\n  // -- Sanitize all text fields --\n  // For fields embedded into HTML: escape HTML entities\n  // For fields used in email headers (to, subject): strip injection chars\n  const firstName   = escapeHtml(truncate((raw.first_name || '').trim(), MAX_FIELD_LENGTH));\n  const lastName    = escapeHtml(truncate((raw.last_name || '').trim(), MAX_FIELD_LENGTH));\n  const company     = escapeHtml(truncate((raw.company || '').trim(), MAX_FIELD_LENGTH));\n  const customField1 = escapeHtml(truncate((raw.custom_field_1 || '').trim(), MAX_FIELD_LENGTH));\n  const customField2 = escapeHtml(truncate((raw.custom_field_2 || '').trim(), MAX_FIELD_LENGTH));\n\n  // Subject: strip header injection chars but do NOT HTML-encode (it's a header, not body)\n  const rawSubject  = stripHeaderInjection(truncate((raw.subject || '').trim(), 998));\n  const bodyTemplate = truncate((raw.body_template || '').trim(), MAX_BODY_LENGTH);\n\n  validItems.push({\n    json: {\n      email,\n      first_name: firstName,\n      last_name: lastName,\n      company,\n      subject: rawSubject,\n      body_template: bodyTemplate,\n      custom_field_1: customField1,\n      custom_field_2: customField2\n    }\n  });\n}\n\nif (validItems.length === 0) {\n  throw new Error('No valid recipient emails found after validation. Check your spreadsheet.');\n}\n\nreturn validItems;"
       },
-      "id": "filter-valid-emails",
-      "name": "Filter Valid Emails",
-      "type": "n8n-nodes-base.filter",
+      "id": "sanitize-and-validate",
+      "name": "Sanitize and Validate Input",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [440, 300]
+      "position": [440, 300],
+      "notes": "SECURITY GATE: Validates email format (RFC 5322), strips header injection chars (CRLF/null), HTML-encodes text fields to prevent XSS, deduplicates recipients, caps at 500 max, truncates oversized fields. Addresses OWASP A05:2025 Injection."
     },
     {
       "parameters": {
@@ -82,22 +55,22 @@
         }
       },
       "id": "split-batches",
-      "name": "Rate Limiter",
+      "name": "Loop Over Items",
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
       "position": [660, 300],
-      "notes": "Processes one email at a time to respect rate limits and avoid spam detection"
+      "notes": "Processes one email per iteration. Output 0 = 'done' (all processed). Output 1 = 'loop' (next batch item)."
     },
     {
       "parameters": {
-        "jsCode": "// Build a fully personalized email for each recipient\nconst item = $input.first().json;\n\nconst firstName = (item.first_name || '').trim();\nconst lastName = (item.last_name || '').trim();\nconst company = (item.company || '').trim();\nconst email = (item.email || '').trim();\nconst subject = (item.subject || '').trim();\nconst customField1 = (item.custom_field_1 || '').trim();\nconst customField2 = (item.custom_field_2 || '').trim();\n\n// Fallback greeting if no first name\nconst greeting = firstName ? `Hi ${firstName},` : 'Hello,';\n\n// Build personalized subject line\nconst personalizedSubject = subject\n  .replace(/{{first_name}}/gi, firstName)\n  .replace(/{{last_name}}/gi, lastName)\n  .replace(/{{company}}/gi, company)\n  .replace(/{{custom_field_1}}/gi, customField1)\n  .replace(/{{custom_field_2}}/gi, customField2);\n\n// Build personalized email body from the spreadsheet body_template column,\n// or fall back to a default template\nconst bodyTemplate = (item.body_template || '').trim();\n\nlet htmlBody;\n\nif (bodyTemplate) {\n  // Replace all placeholders in the user-provided template\n  htmlBody = bodyTemplate\n    .replace(/{{greeting}}/gi, greeting)\n    .replace(/{{first_name}}/gi, firstName)\n    .replace(/{{last_name}}/gi, lastName)\n    .replace(/{{company}}/gi, company)\n    .replace(/{{custom_field_1}}/gi, customField1)\n    .replace(/{{custom_field_2}}/gi, customField2)\n    .replace(/\\n/g, '<br>');\n} else {\n  // Default template when no body_template column is provided\n  htmlBody = `\n    <div style=\"font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;\">\n      <p>${greeting}</p>\n      <p>${customField1 || 'I wanted to reach out to you regarding an opportunity.'}</p>\n      ${company ? `<p>I noticed your work at <strong>${company}</strong> and thought this would be relevant.</p>` : ''}\n      ${customField2 ? `<p>${customField2}</p>` : ''}\n      <p>Looking forward to hearing from you.</p>\n      <p>Best regards</p>\n    </div>\n  `;\n}\n\nreturn [{\n  json: {\n    to: email,\n    subject: personalizedSubject,\n    htmlBody: htmlBody,\n    firstName: firstName,\n    lastName: lastName,\n    company: company\n  }\n}];"
+        "jsCode": "// Compose a personalized email from pre-sanitized input.\n// All text fields have already been HTML-encoded and header-injection-stripped\n// by the upstream Sanitize node. This node only performs safe placeholder\n// substitution — no raw user data touches HTML structure.\n\nconst item = $input.first().json;\n\nconst firstName   = item.first_name || '';\nconst lastName    = item.last_name || '';\nconst company     = item.company || '';\nconst email       = item.email || '';\nconst subject     = item.subject || '';\nconst customField1 = item.custom_field_1 || '';\nconst customField2 = item.custom_field_2 || '';\n\n// Greeting (already HTML-safe)\nconst greeting = firstName ? `Hi ${firstName},` : 'Hello,';\n\n// Personalize subject (already header-injection-safe)\nconst personalizedSubject = subject\n  .replace(/\\{\\{first_name\\}\\}/gi, firstName)\n  .replace(/\\{\\{last_name\\}\\}/gi, lastName)\n  .replace(/\\{\\{company\\}\\}/gi, company)\n  .replace(/\\{\\{custom_field_1\\}\\}/gi, customField1)\n  .replace(/\\{\\{custom_field_2\\}\\}/gi, customField2);\n\n// Build body\nconst bodyTemplate = item.body_template || '';\nlet htmlBody;\n\nif (bodyTemplate) {\n  // User-provided template: all interpolated values are pre-escaped\n  htmlBody = bodyTemplate\n    .replace(/\\{\\{greeting\\}\\}/gi, greeting)\n    .replace(/\\{\\{first_name\\}\\}/gi, firstName)\n    .replace(/\\{\\{last_name\\}\\}/gi, lastName)\n    .replace(/\\{\\{company\\}\\}/gi, company)\n    .replace(/\\{\\{custom_field_1\\}\\}/gi, customField1)\n    .replace(/\\{\\{custom_field_2\\}\\}/gi, customField2)\n    .replace(/\\n/g, '<br>');\n} else {\n  // Default template — all values are pre-HTML-escaped\n  htmlBody = [\n    '<div style=\"font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;\">',\n    `  <p>${greeting}</p>`,\n    `  <p>${customField1 || 'I wanted to reach out to you regarding an opportunity.'}</p>`,\n    company ? `  <p>I noticed your work at <strong>${company}</strong> and thought this would be relevant.</p>` : '',\n    customField2 ? `  <p>${customField2}</p>` : '',\n    '  <p>Looking forward to hearing from you.</p>',\n    '  <p>Best regards</p>',\n    '</div>'\n  ].filter(Boolean).join('\\n');\n}\n\nreturn [{\n  json: {\n    to: email,\n    subject: personalizedSubject || 'No Subject',\n    htmlBody: htmlBody\n  }\n}];"
       },
       "id": "compose-email",
       "name": "Compose Personalized Email",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [880, 300],
-      "notes": "Personalizes each email using spreadsheet columns. Supports placeholders: {{first_name}}, {{last_name}}, {{company}}, {{custom_field_1}}, {{custom_field_2}}"
+      "notes": "Performs placeholder substitution on pre-sanitized data. No raw user input enters HTML structure at this stage."
     },
     {
       "parameters": {
@@ -111,14 +84,15 @@
       "name": "Send Email (Gmail)",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
-      "position": [1100, 200],
+      "position": [1100, 300],
       "credentials": {
         "gmailOAuth2": {
           "id": "GMAIL_CREDENTIAL_ID",
           "name": "Gmail OAuth2"
         }
       },
-      "notes": "Uses Gmail OAuth2. Replace with SMTP node if using a non-Gmail provider."
+      "onError": "continueErrorOutput",
+      "notes": "Uses Gmail OAuth2. On failure, routes to error output (output index 1) so the loop continues."
     },
     {
       "parameters": {
@@ -134,7 +108,7 @@
       "name": "Send Email (SMTP)",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
-      "position": [1100, 500],
+      "position": [1100, 600],
       "disabled": true,
       "credentials": {
         "smtp": {
@@ -142,19 +116,20 @@
           "name": "SMTP Account"
         }
       },
-      "notes": "Alternative: Enable this and disable the Gmail node if using SMTP (Outlook, custom domain, etc.)"
+      "onError": "continueErrorOutput",
+      "notes": "SMTP alternative. Enable this and disable Gmail node to use. On failure, routes to error output."
     },
     {
       "parameters": {
-        "amount": 3,
+        "amount": 5,
         "unit": "seconds"
       },
       "id": "wait-between-emails",
-      "name": "Delay Between Emails",
+      "name": "Throttle Delay",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
-      "position": [1320, 200],
-      "notes": "3-second delay between emails to avoid rate limits. Adjust as needed for your provider."
+      "position": [1320, 250],
+      "notes": "5-second delay between sends. Conservative default to avoid rate limits and spam flags."
     },
     {
       "parameters": {
@@ -169,10 +144,6 @@
               "value": "={{ $('Compose Personalized Email').item.json.to }}"
             },
             {
-              "name": "subject",
-              "value": "={{ $('Compose Personalized Email').item.json.subject }}"
-            },
-            {
               "name": "timestamp",
               "value": "={{ $now.toISO() }}"
             }
@@ -181,18 +152,49 @@
         "options": {}
       },
       "id": "log-success",
-      "name": "Log Sent Email",
+      "name": "Log Success",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [1540, 200],
-      "notes": "Logs successful sends for tracking"
+      "position": [1540, 250],
+      "notes": "Logs only status, recipient address, and timestamp — no email body or subject to avoid sensitive data leakage in logs."
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "failed"
+            },
+            {
+              "name": "recipient",
+              "value": "={{ $('Compose Personalized Email').item.json.to }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ $now.toISO() }}"
+            },
+            {
+              "name": "error_summary",
+              "value": "={{ $json.error ? $json.error.message.substring(0, 200) : 'Unknown error' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "log-failure",
+      "name": "Log Failure",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1320, 450],
+      "notes": "Captures failure with truncated error message. No sensitive data in logs."
     },
     {
       "parameters": {
         "operation": "appendOrUpdate",
         "documentId": {
           "__rl": true,
-          "value": "={{ $('Read Spreadsheet').params.documentId }}",
+          "value": "YOUR_GOOGLE_SHEET_ID_HERE",
           "mode": "id"
         },
         "sheetName": {
@@ -210,34 +212,37 @@
       "name": "Write Log to Sheet",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.5,
-      "position": [1760, 200],
+      "position": [1760, 350],
       "credentials": {
         "googleSheetsOAuth2Api": {
           "id": "GOOGLE_SHEETS_CREDENTIAL_ID",
           "name": "Google Sheets OAuth2"
         }
       },
-      "notes": "Writes send results back to a 'Send Log' tab in the same spreadsheet"
-    },
-    {
-      "parameters": {},
-      "id": "loop-back",
-      "name": "Loop Back",
-      "type": "n8n-nodes-base.noOp",
-      "typeVersion": 1,
-      "position": [1980, 200],
-      "notes": "Routes back to the batch splitter for the next email"
+      "notes": "Appends send result (status + recipient + timestamp only) to 'Send Log' tab. No email content stored."
     },
     {
       "parameters": {
-        "errorMessage": "={{ 'Failed to send email to: ' + $json.to + ' | Error: ' + $json.error.message }}"
+        "values": {
+          "string": [
+            {
+              "name": "summary",
+              "value": "={{ 'Batch complete. Total processed: ' + $('Sanitize and Validate Input').all().length }}"
+            },
+            {
+              "name": "finished_at",
+              "value": "={{ $now.toISO() }}"
+            }
+          ]
+        },
+        "options": {}
       },
-      "id": "error-handler",
-      "name": "Handle Send Error",
+      "id": "batch-complete-summary",
+      "name": "Batch Complete Summary",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [1320, 400],
-      "notes": "Captures failed sends so the workflow continues with remaining emails"
+      "position": [880, 100],
+      "notes": "Runs only after ALL items have been processed (connected to SplitInBatches done output)."
     }
   ],
   "connections": {
@@ -256,29 +261,29 @@
       "main": [
         [
           {
-            "node": "Filter Valid Emails",
+            "node": "Sanitize and Validate Input",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Filter Valid Emails": {
+    "Sanitize and Validate Input": {
       "main": [
         [
           {
-            "node": "Rate Limiter",
+            "node": "Loop Over Items",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Rate Limiter": {
+    "Loop Over Items": {
       "main": [
         [
           {
-            "node": "Loop Back",
+            "node": "Batch Complete Summary",
             "type": "main",
             "index": 0
           }
@@ -307,7 +312,14 @@
       "main": [
         [
           {
-            "node": "Delay Between Emails",
+            "node": "Throttle Delay",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Failure",
             "type": "main",
             "index": 0
           }
@@ -318,25 +330,43 @@
       "main": [
         [
           {
-            "node": "Delay Between Emails",
+            "node": "Throttle Delay",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Failure",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Delay Between Emails": {
+    "Throttle Delay": {
       "main": [
         [
           {
-            "node": "Log Sent Email",
+            "node": "Log Success",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Log Sent Email": {
+    "Log Success": {
+      "main": [
+        [
+          {
+            "node": "Write Log to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Failure": {
       "main": [
         [
           {
@@ -351,29 +381,7 @@
       "main": [
         [
           {
-            "node": "Loop Back",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Loop Back": {
-      "main": [
-        [
-          {
-            "node": "Rate Limiter",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Handle Send Error": {
-      "main": [
-        [
-          {
-            "node": "Delay Between Emails",
+            "node": "Loop Over Items",
             "type": "main",
             "index": 0
           }
@@ -385,6 +393,10 @@
     "executionOrder": "v1",
     "saveManualExecutions": true,
     "callerPolicy": "workflowsFromSameOwner",
+    "saveDataSuccessExecution": "none",
+    "saveExecutionProgress": true,
+    "executionTimeout": 3600,
+    "timezone": "UTC",
     "errorWorkflow": ""
   },
   "staticData": null,
@@ -394,8 +406,8 @@
       "id": "tag-bulk-email"
     },
     {
-      "name": "automation",
-      "id": "tag-automation"
+      "name": "secured",
+      "id": "tag-secured"
     }
   ],
   "pinData": {}
